@@ -4,527 +4,774 @@ title: Context-Aware Resource
 tags: [nebula-resource, how-to, context, observability]
 status: stable
 created: 2025-08-17
-
 ---
 
-# Context-Aware Resource
+# Context-Aware Resources
 
-Guide to creating resources that automatically capture and propagate execution context for enhanced observability and debugging.
+> Ресурсы, автоматически адаптирующиеся к контексту выполнения
 
 ## Overview
 
-Context-aware resources automatically:
+Context-aware ресурсы автоматически получают и используют информацию о текущем workflow, execution, action для обогащения функциональности и улучшения observability.
 
-- Capture execution context (workflow ID, user, tenant, etc.)
-- Propagate context through distributed systems
-- Add context to logs, metrics, and traces
-- Support multi-tenancy
-- Enable request correlation
+## Understanding Context
 
-## Basic Context Awareness
+### What is Resource Context?
 
-### Step 1: Define Context-Aware Resource
+```rust
+#[derive(Clone, Debug)]
+pub struct ResourceContext {
+    // Workflow information
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub workflow_version: Version,
+    pub workflow_tags: HashMap<String, String>,
+    
+    // Execution information
+    pub execution_id: String,
+    pub parent_execution_id: Option<String>,
+    pub execution_attempt: u32,
+    pub execution_started_at: DateTime<Utc>,
+    
+    // Action information
+    pub action_id: String,
+    pub action_name: String,
+    pub action_path: Vec<String>,
+    pub action_index: usize,
+    
+    // Tracing information
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub baggage: HashMap<String, String>,
+    
+    // User information
+    pub user_id: Option<String>,
+    pub tenant_id: Option<String>,
+    pub account_id: Option<String>,
+    pub session_id: Option<String>,
+    
+    // Environment information
+    pub environment: String,
+    pub region: String,
+    pub availability_zone: Option<String>,
+    pub deployment_id: String,
+    
+    // Security context
+    pub auth_token: Option<SecretString>,
+    pub permissions: Vec<String>,
+    pub roles: Vec<String>,
+    
+    // Custom metadata
+    pub metadata: HashMap<String, Value>,
+}
+```
+
+### Context Flow
+
+```mermaid
+graph TD
+    A[Workflow Engine] --> B[Execution Context]
+    B --> C[Action Context]
+    C --> D[Resource Context]
+    D --> E[Resource Instance]
+    E --> F[Business Logic]
+    
+    G[Tracing System] --> D
+    H[Security System] --> D
+    I[User Session] --> D
+```
+
+## Implementing Context Awareness
+
+### Basic Implementation
 
 ```rust
 use nebula_resource::prelude::*;
-use nebula_resource::context::*;
 
 #[derive(Resource)]
 #[resource(
     id = "context_logger",
-    name = "Context-Aware Logger",
-    context_aware = true,  // Enable context awareness
+    context_aware = true
 )]
 pub struct ContextLoggerResource;
 
 pub struct ContextLoggerInstance {
-    id: ResourceInstanceId,
-    writer: Arc<dyn LogWriter>,
-    context: Arc<RwLock<ExecutionContext>>,
-    correlation_id: String,
+    logger: slog::Logger,
+    context: Option<ResourceContext>,
 }
 
-/// Execution context that flows through the system
-#[derive(Clone, Debug)]
-pub struct ExecutionContext {
-    pub execution_id: String,
-    pub workflow_id: String,
-    pub action_id: String,
-    pub user_id: Option<String>,
-    pub tenant_id: Option<String>,
-    pub account_id: Option<String>,
-    pub correlation_id: String,
-    pub trace_id: Option<String>,
-    pub span_id: Option<String>,
-    pub parent_span_id: Option<String>,
-    pub baggage: HashMap<String, String>,
-    pub start_time: DateTime<Utc>,
-}
-
-impl ExecutionContext {
-    /// Create child context for nested operations
-    pub fn child(&self, action_id: &str) -> Self {
-        Self {
-            action_id: action_id.to_string(),
-            parent_span_id: self.span_id.clone(),
-            span_id: Some(generate_span_id()),
-            start_time: Utc::now(),
-            ..self.clone()
-        }
-    }
-    
-    /// Add custom baggage that propagates
-    pub fn with_baggage(mut self, key: String, value: String) -> Self {
-        self.baggage.insert(key, value);
-        self
-    }
-}
-```
-
-### Step 2: Automatic Context Injection
-
-```rust
 #[async_trait]
-impl ContextAwareResource for ContextLoggerResource {
-    type Context = ExecutionContext;
-    
-    /// Create instance with context
-    async fn create_with_context(
-        &self,
-        config: &Self::Config,
-        context: ExecutionContext,
-        resource_context: &ResourceContext,
-    ) -> Result<Self::Instance, ResourceError> {
-        let correlation_id = context.correlation_id.clone();
+impl ContextAware for ContextLoggerInstance {
+    fn inject_context(&mut self, context: ResourceContext) {
+        // Store context
+        self.context = Some(context.clone());
         
-        resource_context.log_info(&format!(
-            "Creating context-aware logger for workflow: {}, correlation: {}",
-            context.workflow_id, correlation_id
+        // Enrich logger with context
+        self.logger = self.logger.new(o!(
+            "workflow_id" => context.workflow_id.clone(),
+            "execution_id" => context.execution_id.clone(),
+            "action_id" => context.action_id.clone(),
+            "trace_id" => context.trace_id.clone(),
+            "user_id" => context.user_id.clone(),
+            "environment" => context.environment.clone(),
         ));
-        
-        Ok(ContextLoggerInstance {
-            id: ResourceInstanceId::new(),
-            writer: Arc::new(JsonLogWriter::new()),
-            context: Arc::new(RwLock::new(context)),
-            correlation_id,
-        })
     }
     
-    /// Update context when it changes
-    async fn update_context(
-        &self,
-        instance: &mut Self::Instance,
-        new_context: ExecutionContext,
-    ) -> Result<(), ResourceError> {
-        *instance.context.write().await = new_context;
-        Ok(())
-    }
-}
-
-impl ContextLoggerInstance {
-    /// Log with automatic context
-    pub async fn log(&self, level: LogLevel, message: &str) {
-        let context = self.context.read().await;
-        
-        let log_entry = ContextualLogEntry {
-            timestamp: Utc::now(),
-            level,
-            message: message.to_string(),
-            
-            // Automatic context fields
-            execution_id: context.execution_id.clone(),
-            workflow_id: context.workflow_id.clone(),
-            action_id: context.action_id.clone(),
-            correlation_id: self.correlation_id.clone(),
-            
-            // Optional context fields
-            user_id: context.user_id.clone(),
-            tenant_id: context.tenant_id.clone(),
-            account_id: context.account_id.clone(),
-            
-            // Tracing context
-            trace_id: context.trace_id.clone(),
-            span_id: context.span_id.clone(),
-            parent_span_id: context.parent_span_id.clone(),
-            
-            // Duration
-            duration_ms: Utc::now()
-                .signed_duration_since(context.start_time)
-                .num_milliseconds(),
-            
-            // Custom fields from baggage
-            custom_fields: context.baggage.clone(),
-            
-            // System info
-            hostname: gethostname::gethostname().to_string_lossy().to_string(),
-            thread_id: format!("{:?}", std::thread::current().id()),
-        };
-        
-        self.writer.write(log_entry).await;
+    fn get_context(&self) -> Option<&ResourceContext> {
+        self.context.as_ref()
     }
     
-    /// Create structured log builder
-    pub fn info(&self, message: &str) -> LogBuilder {
-        LogBuilder::new(self, LogLevel::Info, message)
-    }
-    
-    pub fn error(&self, message: &str) -> LogBuilder {
-        LogBuilder::new(self, LogLevel::Error, message)
-    }
-}
-
-/// Fluent log builder with context
-pub struct LogBuilder<'a> {
-    logger: &'a ContextLoggerInstance,
-    level: LogLevel,
-    message: String,
-    fields: HashMap<String, serde_json::Value>,
-}
-
-impl<'a> LogBuilder<'a> {
-    pub fn field(mut self, key: &str, value: impl Serialize) -> Self {
-        self.fields.insert(
-            key.to_string(),
-            serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
-        );
-        self
-    }
-    
-    pub async fn send(self) {
-        let mut log_message = self.message;
-        
-        if !self.fields.is_empty() {
-            log_message.push_str(" | ");
-            log_message.push_str(&serde_json::to_string(&self.fields).unwrap());
-        }
-        
-        self.logger.log(self.level, &log_message).await;
+    fn clear_context(&mut self) {
+        self.context = None;
+        self.logger = slog::Logger::root(slog::Discard, o!());
     }
 }
 ```
 
-## Advanced: Multi-Tenant Context
-
-### Tenant-Aware Resources
+### Advanced Context Usage
 
 ```rust
-/// Multi-tenant aware resource
-#[derive(Resource)]
-#[resource(
-    id = "tenant_database",
-    context_aware = true,
-    multi_tenant = true,
-)]
-pub struct TenantDatabaseResource;
-
-pub struct TenantDatabaseInstance {
-    pools: Arc<DashMap<String, PgPool>>,  // Pool per tenant
-    context: Arc<RwLock<TenantContext>>,
-    config: TenantDatabaseConfig,
+pub struct AdvancedContextResource {
+    client: HttpClient,
+    context: Option<ResourceContext>,
+    context_headers: HeaderMap,
+    context_tags: HashMap<String, String>,
 }
 
-#[derive(Clone)]
-pub struct TenantContext {
-    pub tenant_id: String,
-    pub tenant_tier: TenantTier,
-    pub data_residency: DataResidency,
-    pub isolation_level: IsolationLevel,
-    pub resource_limits: ResourceLimits,
-}
-
-#[derive(Clone)]
-pub enum TenantTier {
-    Free,
-    Standard,
-    Premium,
-    Enterprise,
-}
-
-#[derive(Clone)]
-pub enum DataResidency {
-    US,
-    EU,
-    APAC,
-    // Specific regions for compliance
-    Germany,  // GDPR strict
-    Switzerland,  // Banking regulations
-}
-
-#[derive(Clone)]
-pub enum IsolationLevel {
-    /// Shared database, schema separation
-    Schema,
-    /// Dedicated database
-    Database,
-    /// Dedicated server
-    Server,
-}
-
-impl TenantDatabaseInstance {
-    /// Get connection for current tenant
-    pub async fn get_connection(&self) -> Result<PooledConnection, DatabaseError> {
-        let context = self.context.read().await;
-        let tenant_id = &context.tenant_id;
+#[async_trait]
+impl ContextAware for AdvancedContextResource {
+    fn inject_context(&mut self, context: ResourceContext) {
+        self.context = Some(context.clone());
         
-        // Get or create pool for tenant
-        let pool = if let Some(pool) = self.pools.get(tenant_id) {
-            pool.clone()
-        } else {
-            self.create_tenant_pool(tenant_id, &context).await?
-        };
-        
-        // Apply resource limits based on tier
-        let conn = match context.tenant_tier {
-            TenantTier::Free => {
-                // Strict limits for free tier
-                timeout(Duration::from_secs(5), pool.acquire()).await??
-            }
-            TenantTier::Enterprise => {
-                // Relaxed limits for enterprise
-                timeout(Duration::from_secs(30), pool.acquire()).await??
-            }
-            _ => {
-                timeout(Duration::from_secs(10), pool.acquire()).await??
-            }
-        };
-        
-        Ok(conn)
-    }
-    
-    async fn create_tenant_pool(
-        &self,
-        tenant_id: &str,
-        context: &TenantContext,
-    ) -> Result<PgPool, DatabaseError> {
-        // Determine connection string based on isolation level
-        let connection_string = match context.isolation_level {
-            IsolationLevel::Schema => {
-                // Shared database, tenant-specific schema
-                format!("{}/{}?schema={}", 
-                    self.config.shared_database_url,
-                    self.config.shared_database_name,
-                    tenant_id
-                )
-            }
-            IsolationLevel::Database => {
-                // Dedicated database
-                format!("{}/tenant_{}", 
-                    self.config.cluster_url,
-                    tenant_id
-                )
-            }
-            IsolationLevel::Server => {
-                // Dedicated server based on data residency
-                let server = self.get_server_for_residency(&context.data_residency);
-                format!("{}/tenant_{}", server, tenant_id)
-            }
-        };
-        
-        // Create pool with tier-specific settings
-        let pool_config = self.get_pool_config_for_tier(&context.tenant_tier);
-        
-        let pool = PgPoolOptions::new()
-            .min_connections(pool_config.min_connections)
-            .max_connections(pool_config.max_connections)
-            .max_lifetime(pool_config.max_lifetime)
-            .idle_timeout(pool_config.idle_timeout)
-            .connect(&connection_string)
-            .await?;
-        
-        self.pools.insert(tenant_id.to_string(), pool.clone());
-        
-        Ok(pool)
-    }
-    
-    /// Execute query with tenant context
-    pub async fn query<T>(&self, sql: &str) -> Result<Vec<T>, DatabaseError> 
-    where
-        T: for<'r> sqlx::FromRow<'r, PgRow>,
-    {
-        let context = self.context.read().await;
-        let mut conn = self.get_connection().await?;
-        
-        // Add tenant context to query
-        let contextualized_sql = format!(
-            "-- tenant_id: {}, tier: {:?}, correlation_id: {}\n{}",
-            context.tenant_id,
-            context.tenant_tier,
-            self.correlation_id,
-            sql
+        // Prepare HTTP headers for tracing
+        self.context_headers = HeaderMap::new();
+        self.context_headers.insert(
+            "X-Trace-Id",
+            context.trace_id.parse().unwrap()
+        );
+        self.context_headers.insert(
+            "X-Span-Id",
+            context.span_id.parse().unwrap()
+        );
+        self.context_headers.insert(
+            "X-Workflow-Id",
+            context.workflow_id.parse().unwrap()
+        );
+        self.context_headers.insert(
+            "X-User-Id",
+            context.user_id.unwrap_or_default().parse().unwrap()
         );
         
-        // Track metrics per tenant
-        let start = Instant::now();
-        let result = sqlx::query_as::<_, T>(&contextualized_sql)
-            .fetch_all(&mut conn)
-            .await?;
+        // Prepare tags for metrics
+        self.context_tags = HashMap::new();
+        self.context_tags.insert("workflow".into(), context.workflow_name.clone());
+        self.context_tags.insert("environment".into(), context.environment.clone());
+        self.context_tags.insert("region".into(), context.region.clone());
         
-        self.record_tenant_metrics(
-            &context.tenant_id,
-            "query",
-            start.elapsed(),
-            result.len()
-        ).await;
+        if let Some(tenant) = &context.tenant_id {
+            self.context_tags.insert("tenant".into(), tenant.clone());
+        }
+    }
+}
+
+impl AdvancedContextResource {
+    pub async fn make_request(&self, url: &str) -> Result<Response> {
+        let mut request = self.client.get(url);
         
-        Ok(result)
+        // Add context headers
+        for (key, value) in &self.context_headers {
+            request = request.header(key, value);
+        }
+        
+        // Add baggage
+        if let Some(context) = &self.context {
+            for (key, value) in &context.baggage {
+                request = request.header(
+                    format!("X-Baggage-{}", key),
+                    value
+                );
+            }
+        }
+        
+        let response = request.send().await?;
+        
+        // Record metrics with context
+        self.record_metrics(&response);
+        
+        Ok(response)
+    }
+    
+    fn record_metrics(&self, response: &Response) {
+        metrics::histogram!(
+            "http.request.duration",
+            response.elapsed().as_millis() as f64,
+            &self.context_tags
+        );
+        
+        metrics::increment!(
+            "http.request.count",
+            &self.context_tags
+        );
+        
+        if !response.status().is_success() {
+            metrics::increment!(
+                "http.request.errors",
+                &self.context_tags
+            );
+        }
     }
 }
 ```
 
 ## Context Propagation
 
-### HTTP Context Propagation
+### Automatic Propagation
 
 ```rust
-/// HTTP client that propagates context
-pub struct ContextAwareHttpClient {
-    client: reqwest::Client,
-    context: Arc<RwLock<ExecutionContext>>,
+pub struct ContextPropagator {
+    extractors: Vec<Box<dyn ContextExtractor>>,
+    injectors: Vec<Box<dyn ContextInjector>>,
 }
 
-impl ContextAwareHttpClient {
-    /// Make request with context propagation
-    pub async fn request(&self, method: Method, url: &str) -> RequestBuilder {
-        let context = self.context.read().await;
+impl ContextPropagator {
+    pub async fn propagate<T: ContextAware>(
+        &self,
+        source: &ExecutionContext,
+        target: &mut T,
+    ) -> Result<()> {
+        // Extract context from multiple sources
+        let mut context = ResourceContext::default();
         
-        self.client
-            .request(method, url)
-            // W3C Trace Context
-            .header("traceparent", format!(
-                "00-{}-{}-01",
-                context.trace_id.as_ref().unwrap_or(&"0".repeat(32)),
-                context.span_id.as_ref().unwrap_or(&"0".repeat(16))
-            ))
-            // Correlation ID
-            .header("X-Correlation-ID", &context.correlation_id)
-            // Tenant context
-            .header("X-Tenant-ID", context.tenant_id.as_ref().unwrap_or(&"".to_string()))
-            // User context
-            .header("X-User-ID", context.user_id.as_ref().unwrap_or(&"".to_string()))
-            // Custom baggage
-            .header("baggage", self.serialize_baggage(&context.baggage))
-    }
-    
-    fn serialize_baggage(&self, baggage: &HashMap<String, String>) -> String {
-        baggage.iter()
-            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join(",")
+        for extractor in &self.extractors {
+            extractor.extract(source, &mut context).await?;
+        }
+        
+        // Inject into target
+        target.inject_context(context.clone());
+        
+        // Run injectors for side effects
+        for injector in &self.injectors {
+            injector.inject(&context).await?;
+        }
+        
+        Ok(())
     }
 }
-```
 
-### Message Queue Context Propagation
+// OpenTelemetry context extractor
+pub struct OpenTelemetryExtractor;
 
-```rust
-/// Kafka producer with context
-pub struct ContextAwareKafkaProducer {
-    producer: FutureProducer,
-    context: Arc<RwLock<ExecutionContext>>,
-}
-
-impl ContextAwareKafkaProducer {
-    pub async fn send(&self, topic: &str, key: &str, value: &[u8]) -> Result<(), KafkaError> {
-        let context = self.context.read().await;
+#[async_trait]
+impl ContextExtractor for OpenTelemetryExtractor {
+    async fn extract(
+        &self,
+        source: &ExecutionContext,
+        context: &mut ResourceContext,
+    ) -> Result<()> {
+        let span = tracing::Span::current();
         
-        let record = FutureRecord::to(topic)
-            .key(key)
-            .payload(value)
-            // Add context as headers
-            .headers(OwnedHeaders::new()
-                .add("correlation-id", &context.correlation_id)
-                .add("execution-id", &context.execution_id)
-                .add("workflow-id", &context.workflow_id)
-                .add("tenant-id", context.tenant_id.as_ref().unwrap_or(&"".to_string()))
-                .add("trace-id", context.trace_id.as_ref().unwrap_or(&"".to_string()))
-            );
+        context.trace_id = span.id()
+            .map(|id| format!("{:x}", id))
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         
-        self.producer.send(record, Duration::from_secs(10)).await?;
+        context.span_id = Uuid::new_v4().to_string();
+        
+        // Extract baggage
+        if let Some(baggage) = source.get_baggage() {
+            context.baggage = baggage.items().collect();
+        }
+        
         Ok(())
     }
 }
 ```
 
-## Observability Integration
-
-### Metrics with Context
+### Cross-Service Propagation
 
 ```rust
-pub struct ContextAwareMetrics {
-    registry: Arc<Registry>,
-    context: Arc<RwLock<ExecutionContext>>,
+pub struct CrossServicePropagator {
+    format: PropagationFormat,
 }
 
-impl ContextAwareMetrics {
-    pub async fn record(&self, metric: &str, value: f64) {
-        let context = self.context.read().await;
-        
-        // Add context as labels
-        let labels = vec![
-            ("workflow_id", context.workflow_id.as_str()),
-            ("action_id", context.action_id.as_str()),
-            ("tenant_id", context.tenant_id.as_deref().unwrap_or("unknown")),
-            ("user_id", context.user_id.as_deref().unwrap_or("unknown")),
-        ];
-        
-        self.registry
-            .get_metric(metric)
-            .unwrap()
-            .with_label_values(&labels)
-            .observe(value);
+pub enum PropagationFormat {
+    W3CTraceContext,
+    B3,
+    Jaeger,
+    Custom(Box<dyn Propagator>),
+}
+
+impl CrossServicePropagator {
+    pub fn inject_headers(&self, context: &ResourceContext) -> HeaderMap {
+        match &self.format {
+            PropagationFormat::W3CTraceContext => {
+                let mut headers = HeaderMap::new();
+                
+                // W3C Trace Context format
+                let traceparent = format!(
+                    "00-{}-{}-01",
+                    context.trace_id,
+                    context.span_id
+                );
+                headers.insert("traceparent", traceparent.parse().unwrap());
+                
+                // Add tracestate if needed
+                if !context.baggage.is_empty() {
+                    let tracestate = context.baggage.iter()
+                        .map(|(k, v)| format!("{}={}", k, v))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    headers.insert("tracestate", tracestate.parse().unwrap());
+                }
+                
+                headers
+            }
+            PropagationFormat::B3 => {
+                let mut headers = HeaderMap::new();
+                
+                // B3 format (Zipkin)
+                headers.insert("X-B3-TraceId", context.trace_id.parse().unwrap());
+                headers.insert("X-B3-SpanId", context.span_id.parse().unwrap());
+                
+                if let Some(parent) = &context.parent_span_id {
+                    headers.insert("X-B3-ParentSpanId", parent.parse().unwrap());
+                }
+                
+                headers.insert("X-B3-Sampled", "1".parse().unwrap());
+                
+                headers
+            }
+            PropagationFormat::Jaeger => {
+                let mut headers = HeaderMap::new();
+                
+                // Jaeger format
+                let uber_trace_id = format!(
+                    "{}:{}:{}:1",
+                    context.trace_id,
+                    context.span_id,
+                    context.parent_span_id.as_ref().unwrap_or(&"0".to_string())
+                );
+                headers.insert("uber-trace-id", uber_trace_id.parse().unwrap());
+                
+                // Add baggage
+                for (key, value) in &context.baggage {
+                    headers.insert(
+                        format!("uberctx-{}", key),
+                        value.parse().unwrap()
+                    );
+                }
+                
+                headers
+            }
+            PropagationFormat::Custom(propagator) => {
+                propagator.inject(context)
+            }
+        }
     }
     
-    pub async fn increment(&self, counter: &str) {
-        let context = self.context.read().await;
-        
-        let labels = self.context_labels(&context);
-        
-        self.registry
-            .get_counter(counter)
-            .unwrap()
-            .with_label_values(&labels)
-            .inc();
+    pub fn extract_context(&self, headers: &HeaderMap) -> ResourceContext {
+        match &self.format {
+            PropagationFormat::W3CTraceContext => {
+                self.extract_w3c_context(headers)
+            }
+            PropagationFormat::B3 => {
+                self.extract_b3_context(headers)
+            }
+            PropagationFormat::Jaeger => {
+                self.extract_jaeger_context(headers)
+            }
+            PropagationFormat::Custom(propagator) => {
+                propagator.extract(headers)
+            }
+        }
     }
 }
 ```
 
-### Distributed Tracing
+## Context Enrichment
+
+### Dynamic Context Enrichment
 
 ```rust
-use opentelemetry::trace::{Tracer, SpanKind};
-
-pub struct ContextAwareTracer {
-    tracer: Box<dyn Tracer>,
-    context: Arc<RwLock<ExecutionContext>>,
+pub struct ContextEnricher {
+    enrichers: Vec<Box<dyn Enricher>>,
 }
 
-impl ContextAwareTracer {
-    pub async fn span<F, Fut, T>(&self, name: &str, f: F) -> Result<T, TracingError>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<T, TracingError>>,
-    {
-        let context = self.context.read().await;
+#[async_trait]
+pub trait Enricher: Send + Sync {
+    async fn enrich(&self, context: &mut ResourceContext) -> Result<()>;
+}
+
+// User information enricher
+pub struct UserEnricher {
+    user_service: Arc<UserService>,
+}
+
+#[async_trait]
+impl Enricher for UserEnricher {
+    async fn enrich(&self, context: &mut ResourceContext) -> Result<()> {
+        if let Some(user_id) = &context.user_id {
+            let user_info = self.user_service.get_user(user_id).await?;
+            
+            context.metadata.insert(
+                "user_email".into(),
+                json!(user_info.email)
+            );
+            context.metadata.insert(
+                "user_tier".into(),
+                json!(user_info.tier)
+            );
+            context.roles = user_info.roles;
+            context.permissions = user_info.permissions;
+        }
         
-        let span = self.tracer
-            .span_builder(name)
-            .with_kind(SpanKind::Internal)
-            .with_attributes(vec![
-                KeyValue::new("workflow.id", context.workflow_id.clone()),
-                KeyValue::new("action.id", context.action_id.clone()),
-                KeyValue::new("correlation.id", context.correlation_id.clone()),
-                KeyValue::new("tenant.id", context.tenant_id.clone().unwrap_or_default()),
-            ])
-            .start(&self.tracer);
+        Ok(())
+    }
+}
+
+// Geographic enricher
+pub struct GeoEnricher {
+    geo_service: Arc<GeoService>,
+}
+
+#[async_trait]
+impl Enricher for GeoEnricher {
+    async fn enrich(&self, context: &mut ResourceContext) -> Result<()> {
+        // Get IP from execution context
+        if let Some(ip) = context.metadata.get("client_ip") {
+            let location = self.geo_service.lookup(ip.as_str().unwrap()).await?;
+            
+            context.metadata.insert(
+                "country".into(),
+                json!(location.country)
+            );
+            context.metadata.insert(
+                "city".into(),
+                json!(location.city)
+            );
+            context.metadata.insert(
+                "coordinates".into(),
+                json!({
+                    "lat": location.latitude,
+                    "lon": location.longitude
+                })
+            );
+        }
+        
+        Ok(())
+    }
+}
+```
+
+### Conditional Context
+
+```rust
+pub struct ConditionalContext {
+    base_context: ResourceContext,
+    conditions: Vec<ContextCondition>,
+}
+
+pub struct ContextCondition {
+    predicate: Box<dyn Fn(&ResourceContext) -> bool>,
+    modifier: Box<dyn Fn(&mut ResourceContext)>,
+}
+
+impl ConditionalContext {
+    pub fn evaluate(&self) -> ResourceContext {
+        let mut context = self.base_context.clone();
+        
+        for condition in &self.conditions {
+            if (condition.predicate)(&context) {
+                (condition.modifier)(&mut context);
+            }
+        }
+        
+        context
+    }
+    
+    pub fn with_condition<P, M>(mut self, predicate: P, modifier: M) -> Self
+    where
+        P: Fn(&ResourceContext) -> bool + 'static,
+        M: Fn(&mut ResourceContext) + 'static,
+    {
+        self.conditions.push(ContextCondition {
+            predicate: Box::new(predicate),
+            modifier: Box::new(modifier),
+        });
+        self
+    }
+}
+
+// Usage
+let context = ConditionalContext::new(base_context)
+    .with_condition(
+        |ctx| ctx.environment == "production",
+        |ctx| {
+            ctx.metadata.insert("strict_mode".into(), json!(true));
+            ctx.metadata.insert("sampling_rate".into(), json!(0.1));
+        }
+    )
+    .with_condition(
+        |ctx| ctx.user_id.is_some(),
+        |ctx| {
+            ctx.metadata.insert("personalized".into(), json!(true));
+        }
+    )
+    .evaluate();
+```
+
+## Use Cases
+
+### 1. Distributed Tracing
+
+```rust
+pub struct TracedHttpClient {
+    client: reqwest::Client,
+    context: Option<ResourceContext>,
+}
+
+impl TracedHttpClient {
+    pub async fn request(&self, method: Method, url: &str) -> Result<Response> {
+        let span = if let Some(ctx) = &self.context {
+            tracing::info_span!(
+                "http.request",
+                trace_id = %ctx.trace_id,
+                span_id = %ctx.span_id,
+                workflow_id = %ctx.workflow_id,
+                user_id = ?ctx.user_id,
+            )
+        } else {
+            tracing::info_span!("http.request")
+        };
         
         let _guard = span.enter();
         
-        f().await
+        let mut request = self.client.request(method, url);
+        
+        // Add tracing headers
+        if let Some(ctx) = &self.context {
+            request = request
+                .header("X-Trace-Id", &ctx.trace_id)
+                .header("X-Span-Id", &ctx.span_id);
+        }
+        
+        let response = request.send().await?;
+        
+        tracing::info!(
+            status = response.status().as_u16(),
+            "Request completed"
+        );
+        
+        Ok(response)
     }
 }
 ```
 
-## Testing Context-Aware Resources
+### 2. Audit Logging
+
+```rust
+pub struct AuditLogger {
+    context: Option<ResourceContext>,
+    writer: Arc<dyn AuditWriter>,
+}
+
+impl AuditLogger {
+    pub async fn log_action(&self, action: &str, details: Value) -> Result<()> {
+        let entry = AuditEntry {
+            timestamp: Utc::now(),
+            action: action.to_string(),
+            details,
+            // Context information
+            workflow_id: self.context.as_ref().map(|c| c.workflow_id.clone()),
+            execution_id: self.context.as_ref().map(|c| c.execution_id.clone()),
+            user_id: self.context.as_ref().and_then(|c| c.user_id.clone()),
+            tenant_id: self.context.as_ref().and_then(|c| c.tenant_id.clone()),
+            trace_id: self.context.as_ref().map(|c| c.trace_id.clone()),
+            // Security context
+            roles: self.context.as_ref().map(|c| c.roles.clone()).unwrap_or_default(),
+            permissions: self.context.as_ref().map(|c| c.permissions.clone()).unwrap_or_default(),
+            // Environment
+            environment: self.context.as_ref().map(|c| c.environment.clone()),
+            region: self.context.as_ref().map(|c| c.region.clone()),
+            // Custom metadata
+            metadata: self.context.as_ref().map(|c| c.metadata.clone()).unwrap_or_default(),
+        };
+        
+        self.writer.write(entry).await
+    }
+}
+```
+
+### 3. Personalized Caching
+
+```rust
+pub struct ContextualCache {
+    cache: Arc<dyn CacheBackend>,
+    context: Option<ResourceContext>,
+}
+
+impl ContextualCache {
+    pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+        let contextual_key = self.build_contextual_key(key);
+        self.cache.get(&contextual_key).await
+    }
+    
+    pub async fn set<T: Serialize>(&self, key: &str, value: &T, ttl: Duration) -> Result<()> {
+        let contextual_key = self.build_contextual_key(key);
+        
+        // Adjust TTL based on context
+        let adjusted_ttl = self.adjust_ttl(ttl);
+        
+        self.cache.set(&contextual_key, value, adjusted_ttl).await
+    }
+    
+    fn build_contextual_key(&self, base_key: &str) -> String {
+        if let Some(ctx) = &self.context {
+            let mut key_parts = vec![base_key.to_string()];
+            
+            // Add user-specific prefix for personalized caching
+            if let Some(user_id) = &ctx.user_id {
+                key_parts.push(format!("user:{}", user_id));
+            }
+            
+            // Add tenant for multi-tenancy
+            if let Some(tenant_id) = &ctx.tenant_id {
+                key_parts.push(format!("tenant:{}", tenant_id));
+            }
+            
+            // Add environment to prevent cache pollution
+            key_parts.push(format!("env:{}", ctx.environment));
+            
+            key_parts.join(":")
+        } else {
+            base_key.to_string()
+        }
+    }
+    
+    fn adjust_ttl(&self, base_ttl: Duration) -> Duration {
+        if let Some(ctx) = &self.context {
+            // Shorter TTL in development
+            if ctx.environment == "development" {
+                return Duration::from_secs(60);
+            }
+            
+            // Longer TTL for authenticated users
+            if ctx.user_id.is_some() {
+                return base_ttl * 2;
+            }
+        }
+        
+        base_ttl
+    }
+}
+```
+
+### 4. Multi-Tenant Database
+
+```rust
+pub struct TenantAwareDatabase {
+    pool: PgPool,
+    context: Option<ResourceContext>,
+}
+
+impl TenantAwareDatabase {
+    pub async fn query<T>(&self, sql: &str) -> Result<Vec<T>> 
+    where
+        T: for<'r> FromRow<'r, PgRow>,
+    {
+        let tenant_id = self.context
+            .as_ref()
+            .and_then(|c| c.tenant_id.as_ref())
+            .ok_or_else(|| anyhow!("Tenant ID required"))?;
+        
+        // Add tenant filter to query
+        let tenant_sql = self.add_tenant_filter(sql, tenant_id);
+        
+        // Set session variable for row-level security
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&format!("SET app.tenant_id = '{}'", tenant_id))
+            .execute(&mut conn)
+            .await?;
+        
+        // Execute query
+        let rows = sqlx::query_as::<_, T>(&tenant_sql)
+            .fetch_all(&mut conn)
+            .await?;
+        
+        Ok(rows)
+    }
+    
+    fn add_tenant_filter(&self, sql: &str, tenant_id: &str) -> String {
+        // Simple implementation - in production use proper SQL parser
+        if sql.contains("WHERE") {
+            format!("{} AND tenant_id = '{}'", sql, tenant_id)
+        } else {
+            format!("{} WHERE tenant_id = '{}'", sql, tenant_id)
+        }
+    }
+}
+```
+
+## Best Practices
+
+### 1. Context Design
+
+```rust
+// DO: Keep context immutable after injection
+pub struct GoodResource {
+    context: Arc<ResourceContext>, // Immutable reference
+}
+
+// DON'T: Allow context mutation
+pub struct BadResource {
+    context: ResourceContext, // Mutable, can lead to inconsistencies
+}
+```
+
+### 2. Context Propagation
+
+```rust
+// DO: Propagate only necessary context
+pub fn filter_context(context: &ResourceContext) -> ResourceContext {
+    ResourceContext {
+        trace_id: context.trace_id.clone(),
+        span_id: Uuid::new_v4().to_string(), // New span
+        parent_span_id: Some(context.span_id.clone()),
+        workflow_id: context.workflow_id.clone(),
+        user_id: context.user_id.clone(),
+        // Don't propagate sensitive data
+        auth_token: None,
+        ..Default::default()
+    }
+}
+
+// DON'T: Blindly propagate everything
+pub fn bad_propagation(context: &ResourceContext) -> ResourceContext {
+    context.clone() // May leak sensitive data
+}
+```
+
+### 3. Performance Considerations
+
+```rust
+// DO: Lazy context evaluation
+pub struct LazyContextResource {
+    context_provider: Arc<dyn Fn() -> ResourceContext>,
+}
+
+impl LazyContextResource {
+    fn get_context(&self) -> ResourceContext {
+        (self.context_provider)() // Evaluate only when needed
+    }
+}
+
+// DON'T: Eager context loading
+pub struct EagerContextResource {
+    context: ResourceContext, // Loaded even if not used
+}
+```
+
+### 4. Testing Context-Aware Resources
 
 ```rust
 #[cfg(test)]
@@ -532,64 +779,158 @@ mod tests {
     use super::*;
     
     #[tokio::test]
-    async fn test_context_propagation() {
-        let context = ExecutionContext {
-            execution_id: "exec-123".into(),
-            workflow_id: "workflow-456".into(),
-            action_id: "action-789".into(),
-            user_id: Some("user-abc".into()),
-            tenant_id: Some("tenant-xyz".into()),
-            correlation_id: "corr-111".into(),
-            trace_id: Some("trace-222".into()),
-            span_id: Some("span-333".into()),
-            parent_span_id: None,
-            baggage: hashmap! {
-                "custom_field".into() => "custom_value".into(),
-            },
-            start_time: Utc::now(),
+    async fn test_context_injection() {
+        let mut resource = create_resource();
+        
+        let context = ResourceContext {
+            workflow_id: "test_workflow".into(),
+            execution_id: "test_execution".into(),
+            trace_id: "test_trace".into(),
+            ..Default::default()
         };
         
-        let logger = create_context_logger(context.clone()).await;
+        resource.inject_context(context.clone());
         
-        // Log should include all context
-        logger.info("Test message")
-            .field("extra", "data")
-            .send()
-            .await;
-        
-        // Verify log contains context
-        let logs = get_test_logs().await;
-        let log = &logs[0];
-        
-        assert_eq!(log.execution_id, "exec-123");
-        assert_eq!(log.workflow_id, "workflow-456");
-        assert_eq!(log.correlation_id, "corr-111");
-        assert_eq!(log.tenant_id, Some("tenant-xyz".into()));
+        assert_eq!(
+            resource.get_context().unwrap().workflow_id,
+            "test_workflow"
+        );
     }
     
     #[tokio::test]
-    async fn test_child_context() {
-        let parent = ExecutionContext::new("exec-1", "workflow-1", "action-1");
-        let child = parent.child("action-2");
+    async fn test_context_propagation() {
+        let propagator = ContextPropagator::new();
         
-        assert_eq!(child.execution_id, parent.execution_id);
-        assert_eq!(child.workflow_id, parent.workflow_id);
-        assert_eq!(child.action_id, "action-2");
-        assert_eq!(child.parent_span_id, parent.span_id);
-        assert_ne!(child.span_id, parent.span_id);
+        let context = create_test_context();
+        let headers = propagator.inject_headers(&context);
+        
+        assert!(headers.contains_key("traceparent"));
+        
+        let extracted = propagator.extract_context(&headers);
+        assert_eq!(extracted.trace_id, context.trace_id);
     }
 }
 ```
 
-## Best Practices
+## Complete Example
 
-1. **Always propagate context** - Through all service boundaries
-2. **Use correlation IDs** - For request tracing
-3. **Include tenant context** - For multi-tenancy
-4. **Add to logs/metrics** - For observability
-5. **Keep context lightweight** - Don't add large data
-6. **Use standard headers** - W3C Trace Context
-7. **Test context flow** - Ensure propagation works
-8. **Handle missing context** - Graceful defaults
-9. **Secure sensitive context** - Don't log PII
-10. **Version context schema** - For compatibility
+```rust
+use nebula_resource::prelude::*;
+
+// Context-aware metrics collector
+#[derive(Resource)]
+#[resource(
+    id = "contextual_metrics",
+    context_aware = true
+)]
+pub struct ContextualMetricsResource;
+
+pub struct ContextualMetricsInstance {
+    client: MetricsClient,
+    context: Option<ResourceContext>,
+    base_tags: HashMap<String, String>,
+}
+
+#[async_trait]
+impl ContextAware for ContextualMetricsInstance {
+    fn inject_context(&mut self, context: ResourceContext) {
+        self.context = Some(context.clone());
+        
+        // Build base tags from context
+        self.base_tags.clear();
+        self.base_tags.insert("workflow".into(), context.workflow_name);
+        self.base_tags.insert("environment".into(), context.environment);
+        self.base_tags.insert("region".into(), context.region);
+        
+        if let Some(tenant) = context.tenant_id {
+            self.base_tags.insert("tenant".into(), tenant);
+        }
+        
+        if let Some(user) = context.user_id {
+            // Hash user ID for privacy
+            let hashed = hash_user_id(&user);
+            self.base_tags.insert("user_hash".into(), hashed);
+        }
+    }
+}
+
+impl ContextualMetricsInstance {
+    pub fn record_metric(
+        &self,
+        name: &str,
+        value: f64,
+        additional_tags: Option<HashMap<String, String>>,
+    ) {
+        let mut tags = self.base_tags.clone();
+        
+        // Add execution context
+        if let Some(ctx) = &self.context {
+            tags.insert("execution_id".into(), ctx.execution_id.clone());
+            tags.insert("action".into(), ctx.action_name.clone());
+        }
+        
+        // Merge additional tags
+        if let Some(additional) = additional_tags {
+            tags.extend(additional);
+        }
+        
+        self.client.record(name, value, tags);
+    }
+    
+    pub fn increment(&self, name: &str) {
+        self.record_metric(name, 1.0, None);
+    }
+    
+    pub fn histogram(&self, name: &str, value: f64) {
+        self.record_metric(name, value, None);
+    }
+    
+    pub fn gauge(&self, name: &str, value: f64) {
+        self.record_metric(name, value, None);
+    }
+}
+
+// Usage in action
+#[derive(Action)]
+struct ProcessOrderAction {
+    order_id: String,
+}
+
+#[async_trait]
+impl ActionHandler for ProcessOrderAction {
+    type Output = OrderResult;
+    
+    async fn execute(&self, ctx: &ExecutionContext) -> Result<Self::Output> {
+        let metrics = ctx.resource::<ContextualMetricsInstance>("metrics").await?;
+        
+        // Metrics automatically include all context
+        metrics.increment("order.processing.started");
+        
+        let start = Instant::now();
+        let result = process_order(&self.order_id).await?;
+        
+        metrics.histogram(
+            "order.processing.duration",
+            start.elapsed().as_millis() as f64,
+        );
+        
+        metrics.record_metric(
+            "order.value",
+            result.total_amount,
+            Some(HashMap::from([
+                ("currency".into(), result.currency.clone()),
+                ("payment_method".into(), result.payment_method.clone()),
+            ])),
+        );
+        
+        Ok(result)
+    }
+}
+```
+
+## Next Steps
+
+- [[ResourceScoping|Resource Scoping Strategies]]
+- [[HealthChecks|Health Monitoring with Context]]
+- [[Examples/ContextAwareLogger|Context Logger Example]]
+- [[Patterns/StateManagement|State Management Patterns]]

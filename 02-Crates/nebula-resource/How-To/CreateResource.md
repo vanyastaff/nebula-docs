@@ -6,527 +6,805 @@ status: stable
 created: 2025-08-17
 ---
 
-# Create Custom Resource
 
-Complete guide to creating a custom resource for your specific needs.
+## Resource Architecture
 
-## Overview
+### Resource Components
 
-Custom resources allow you to wrap any external service or stateful component with:
+```mermaid
+graph TD
+    A[Resource Trait] --> B[Resource Instance]
+    A --> C[Resource Config]
+    B --> D[Business Logic]
+    B --> E[Health Checks]
+    B --> F[Metrics]
+    C --> G[Validation]
+    C --> H[Credentials]
+```
 
-- Automatic lifecycle management
-- Health monitoring
-- Connection pooling
-- Credential management
-- Context awareness
-- Testing support
+### Design Principles
 
-## Basic Resource Structure
+1. **Single Responsibility** - Один ресурс = один сервис
+2. **Dependency Injection** - Явные зависимости
+3. **Configuration as Code** - Версионируемая конфигурация
+4. **Observability First** - Встроенные метрики и логирование
+5. **Failure Resilience** - Graceful degradation
 
-### Step 1: Define the Resource
+## Using Derive Macros
+
+### Basic Derive
 
 ```rust
 use nebula_resource::prelude::*;
-use async_trait::async_trait;
 
-/// Your custom resource definition
 #[derive(Resource)]
 #[resource(
-    id = "weather_api",
-    name = "Weather API Client",
-    description = "Provides weather data from external API",
-    category = "External",
-    lifecycle = "global",  // or "workflow", "execution", "action"
-    capabilities = ["weather", "forecast", "historical"],
-    credentials = ["weather_api_key"],
-    health_checks = ["connectivity", "rate_limit"]
+    id = "my_service",
+    name = "My Custom Service",
+    lifecycle = "global"
 )]
-#[auto_mock]  // Generates MockWeatherApiResource automatically
-pub struct WeatherApiResource;
+pub struct MyServiceResource;
 ```
 
-### Step 2: Define Configuration
+### Advanced Derive Options
 
 ```rust
-#[derive(ResourceConfig, Debug, Clone)]
-pub struct WeatherApiConfig {
-    /// API endpoint URL
+#[derive(Resource)]
+#[resource(
+    // Metadata
+    id = "advanced_service",
+    name = "Advanced Service",
+    description = "Service with advanced features",
+    version = "2.0.0",
+    
+    // Lifecycle
+    lifecycle = "workflow",
+    pooled = true,
+    pool_size = "min:5,max:20",
+    
+    // Capabilities
+    capabilities = ["read", "write", "stream"],
+    tags = ["database", "critical"],
+    
+    // Dependencies
+    depends_on = ["logger", "metrics"],
+    credentials = ["api_key", "api_secret"],
+    
+    // Health checks
+    health_check_interval = "30s",
+    health_check_timeout = "5s",
+    
+    // Circuit breaker
+    circuit_breaker = true,
+    failure_threshold = 5,
+    recovery_timeout = "60s",
+    
+    // Observability
+    metrics = true,
+    tracing = true,
+    
+    // Auto-generation
+    auto_mock = true,
+    auto_builder = true
+)]
+pub struct AdvancedServiceResource;
+```
+
+### Generated Code
+
+Макрос генерирует:
+
+```rust
+// Auto-generated implementation
+impl Resource for AdvancedServiceResource {
+    type Config = AdvancedServiceConfig;
+    type Instance = AdvancedServiceInstance;
+    
+    fn metadata() -> ResourceMetadata {
+        ResourceMetadata {
+            id: "advanced_service".into(),
+            name: "Advanced Service".into(),
+            // ... other fields
+        }
+    }
+    
+    // ... other methods
+}
+
+// Auto-generated builder
+pub struct AdvancedServiceBuilder {
+    config: AdvancedServiceConfig,
+}
+
+impl AdvancedServiceBuilder {
+    pub fn new() -> Self { /* ... */ }
+    pub fn with_endpoint(mut self, endpoint: String) -> Self { /* ... */ }
+    pub fn with_timeout(mut self, timeout: Duration) -> Self { /* ... */ }
+    pub fn build(self) -> AdvancedServiceResource { /* ... */ }
+}
+
+// Auto-generated mock
+#[cfg(test)]
+pub struct MockAdvancedServiceResource {
+    // ... mock implementation
+}
+```
+
+## Advanced Configuration
+
+### Multi-tier Configuration
+
+```rust
+#[derive(ResourceConfig)]
+pub struct ServiceConfig {
+    // Basic configuration
     #[validate(url)]
-    #[tier(personal = "https://api.weather.com/free", 
-           enterprise = "https://api.weather.com/premium")]
     pub endpoint: String,
     
-    /// Rate limit (requests per minute)
-    #[validate(range = "1..=1000")]
-    #[tier(personal = "max:10", enterprise = "max:100", cloud = "max:1000")]
+    // Tier-specific configuration
+    #[tier(personal = "10", professional = "100", enterprise = "1000")]
     pub rate_limit: u32,
     
-    /// Request timeout in seconds
-    #[validate(range = "1..=60")]
-    pub timeout_secs: u64,
+    #[tier(personal = "disabled", professional = "optional", enterprise = "required")]
+    pub advanced_features: FeatureSet,
     
-    /// Enable caching
-    #[tier(personal = "false", enterprise = "true")]
-    pub enable_cache: bool,
+    // Environment-specific
+    #[env(development = "http://localhost:8080", production = "${SERVICE_URL}")]
+    pub service_url: String,
     
-    /// Cache TTL in seconds
-    #[validate(range = "60..=3600")]
-    pub cache_ttl_secs: u64,
+    // Secret management
+    #[credential(id = "service_api_key", rotation = "30d")]
+    pub api_key: SecretString,
     
-    /// API key credential reference
-    #[credential(id = "weather_api_key")]
-    pub api_key_credential: String,
+    // Complex validation
+    #[validate(custom = "validate_connection_string")]
+    pub connection_string: String,
     
-    /// Optional webhook for alerts
-    #[validate(url)]
-    #[tier(personal = "disabled")]
-    pub alert_webhook: Option<String>,
+    // Default with factory
+    #[default_factory = "default_retry_policy")]
+    pub retry_policy: RetryPolicy,
 }
 
-// Provide defaults
-impl Default for WeatherApiConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: "https://api.weather.com/v1".into(),
-            rate_limit: 60,
-            timeout_secs: 30,
-            enable_cache: true,
-            cache_ttl_secs: 300,
-            api_key_credential: "weather_api_key".into(),
-            alert_webhook: None,
+// Custom validation
+fn validate_connection_string(value: &str) -> Result<(), ValidationError> {
+    if !value.starts_with("postgres://") && !value.starts_with("mysql://") {
+        return Err(ValidationError::new("Invalid connection string format"));
+    }
+    Ok(())
+}
+
+// Default factory
+fn default_retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(100),
+        max_delay: Duration::from_secs(10),
+        multiplier: 2.0,
+        jitter: true,
+    }
+}
+```
+
+### Configuration Loading
+
+```rust
+// Load from multiple sources
+let config = ServiceConfig::load()
+    .from_file("config/service.toml")      // 1. File
+    .from_env_prefix("SERVICE_")           // 2. Environment
+    .from_consul("service/config")         // 3. Consul
+    .from_vault("secret/service")          // 4. Vault
+    .with_overrides(overrides)             // 5. Runtime overrides
+    .validate()                             // 6. Validation
+    .await?;
+```
+
+### Dynamic Configuration
+
+```rust
+pub struct DynamicConfig {
+    base: ServiceConfig,
+    watcher: ConfigWatcher,
+}
+
+impl DynamicConfig {
+    pub async fn watch_for_changes(&mut self) -> Result<()> {
+        let mut stream = self.watcher.changes().await?;
+        
+        while let Some(change) = stream.next().await {
+            match change {
+                ConfigChange::Updated(new_config) => {
+                    self.apply_update(new_config).await?;
+                }
+                ConfigChange::Deleted(key) => {
+                    self.apply_default(key).await?;
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    async fn apply_update(&mut self, new_config: Value) -> Result<()> {
+        // Validate new configuration
+        let validated = ServiceConfig::from_value(new_config)?;
+        
+        // Apply without service interruption
+        self.base = validated;
+        
+        // Notify resource instances
+        self.notify_instances().await?;
+        
+        Ok(())
+    }
+}
+```
+
+## Error Handling
+
+### Custom Error Types
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceError {
+    #[error("Connection failed: {0}")]
+    ConnectionError(String),
+    
+    #[error("Authentication failed")]
+    AuthError(#[from] AuthError),
+    
+    #[error("Rate limit exceeded: retry after {retry_after:?}")]
+    RateLimitError { retry_after: Duration },
+    
+    #[error("Service unavailable: {reason}")]
+    ServiceUnavailable { reason: String },
+    
+    #[error("Invalid request: {details}")]
+    InvalidRequest { details: String },
+    
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl ServiceError {
+    pub fn is_retriable(&self) -> bool {
+        matches!(self, 
+            ServiceError::ConnectionError(_) | 
+            ServiceError::RateLimitError { .. } |
+            ServiceError::ServiceUnavailable { .. }
+        )
+    }
+    
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            ServiceError::RateLimitError { retry_after } => Some(*retry_after),
+            _ => None,
         }
     }
 }
 ```
 
-### Step 3: Implement Resource Instance
+### Error Recovery
 
 ```rust
-use std::sync::Arc;
-use dashmap::DashMap;
-use tokio::sync::RwLock;
-
-pub struct WeatherApiInstance {
-    id: ResourceInstanceId,
-    client: reqwest::Client,
-    config: WeatherApiConfig,
-    rate_limiter: RateLimiter,
-    cache: Arc<DashMap<String, CachedWeatherData>>,
+pub struct ErrorRecovery {
+    strategy: RecoveryStrategy,
     circuit_breaker: CircuitBreaker,
-    metrics: Arc<WeatherMetrics>,
-    last_health_check: RwLock<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug)]
-struct CachedWeatherData {
-    data: WeatherData,
-    cached_at: DateTime<Utc>,
-}
-
-impl CachedWeatherData {
-    fn is_expired(&self, ttl: Duration) -> bool {
-        Utc::now().signed_duration_since(self.cached_at) > chrono::Duration::from_std(ttl).unwrap()
-    }
-}
-
-#[async_trait]
-impl ResourceInstance for WeatherApiInstance {
-    fn id(&self) -> &ResourceInstanceId {
-        &self.id
-    }
-    
-    async fn health_check(&self) -> Result<HealthStatus, ResourceError> {
-        // Check circuit breaker first
-        if self.circuit_breaker.is_open() {
-            return Ok(HealthStatus::Degraded {
-                reason: "Circuit breaker is open".into(),
-                performance_impact: 0.5,
-            });
-        }
-        
-        // Test API connectivity
-        let health_url = format!("{}/health", self.config.endpoint);
-        match self.client
-            .get(&health_url)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {
-                *self.last_health_check.write().await = Utc::now();
-                self.circuit_breaker.record_success();
-                Ok(HealthStatus::Healthy)
-            }
-            Ok(response) => {
-                self.circuit_breaker.record_failure();
-                Ok(HealthStatus::Unhealthy {
-                    reason: format!("API returned status: {}", response.status()),
-                    recoverable: true,
-                })
-            }
-            Err(e) => {
-                self.circuit_breaker.record_failure();
-                Ok(HealthStatus::Unhealthy {
-                    reason: format!("Connection failed: {}", e),
-                    recoverable: true,
-                })
-            }
-        }
-    }
-    
-    async fn cleanup(&mut self) -> Result<(), ResourceError> {
-        // Clear cache
-        self.cache.clear();
-        
-        // Log cleanup
-        log::info!("Cleaned up WeatherApi resource {}", self.id);
-        
-        Ok(())
-    }
-    
-    fn metrics(&self) -> ResourceMetrics {
-        ResourceMetrics {
-            requests_total: self.metrics.requests_total.get(),
-            errors_total: self.metrics.errors_total.get(),
-            cache_hits: self.metrics.cache_hits.get(),
-            cache_misses: self.metrics.cache_misses.get(),
-            average_latency_ms: self.metrics.average_latency_ms(),
-            circuit_breaker_state: self.circuit_breaker.state().to_string(),
-        }
-    }
-    
-    fn is_reusable(&self) -> bool {
-        true  // Can be reused across actions
-    }
-    
-    async fn reset(&mut self) -> Result<(), ResourceError> {
-        // Clear request-specific state if any
-        Ok(())
-    }
-}
-```
-
-### Step 4: Implement Resource Trait
-
-```rust
-#[async_trait]
-impl Resource for WeatherApiResource {
-    type Config = WeatherApiConfig;
-    type Instance = WeatherApiInstance;
-    
-    async fn create(
+impl ErrorRecovery {
+    pub async fn execute_with_recovery<F, T>(
         &self,
-        config: &Self::Config,
-        context: &ResourceContext,
-    ) -> Result<Self::Instance, ResourceError> {
-        // Get API key from credential system
-        let api_key = context
-            .get_credential(&config.api_key_credential)
-            .await
-            .map_err(|e| ResourceError::MissingCredential(e.to_string()))?;
+        operation: F,
+    ) -> Result<T, ServiceError>
+    where
+        F: Fn() -> Future<Output = Result<T, ServiceError>>,
+    {
+        let mut attempts = 0;
+        let mut last_error = None;
         
-        // Create HTTP client with defaults
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs))
-            .user_agent("nebula-weather/1.0")
-            .default_headers({
-                let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(
-                    "X-API-Key",
-                    api_key.expose_secret().parse().unwrap()
-                );
-                headers
-            })
-            .build()
-            .map_err(|e| ResourceError::CreationFailed(e.to_string()))?;
-        
-        // Test connection
-        let test_url = format!("{}/test", config.endpoint);
-        client.get(&test_url)
-            .send()
-            .await
-            .map_err(|e| ResourceError::CreationFailed(
-                format!("Failed to connect to weather API: {}", e)
-            ))?;
-        
-        context.log_info(&format!(
-            "Created WeatherApi resource with endpoint: {}, rate limit: {}/min",
-            config.endpoint, config.rate_limit
-        ));
-        
-        Ok(WeatherApiInstance {
-            id: ResourceInstanceId::new(),
-            client,
-            config: config.clone(),
-            rate_limiter: RateLimiter::new(config.rate_limit, Duration::from_secs(60)),
-            cache: Arc::new(DashMap::new()),
-            circuit_breaker: CircuitBreaker::new(CircuitBreakerConfig::default()),
-            metrics: Arc::new(WeatherMetrics::new()),
-            last_health_check: RwLock::new(Utc::now()),
-        })
-    }
-    
-    fn validate_config(&self, config: &Self::Config) -> Result<(), ResourceError> {
-        if config.rate_limit == 0 {
-            return Err(ResourceError::InvalidConfig {
-                field: "rate_limit".into(),
-                reason: "Rate limit must be greater than 0".into(),
-            });
-        }
-        
-        if config.cache_ttl_secs < 60 {
-            return Err(ResourceError::InvalidConfig {
-                field: "cache_ttl_secs".into(),
-                reason: "Cache TTL must be at least 60 seconds".into(),
-            });
-        }
-        
-        Ok(())
-    }
-    
-    fn estimate_requirements(&self, config: &Self::Config) -> ResourceRequirements {
-        ResourceRequirements {
-            memory_mb: 10 + (config.rate_limit as usize / 10), // Rough estimate
-            cpu_millicores: 50,
-            network_bandwidth_kbps: config.rate_limit as usize * 10,
-            storage_mb: if config.enable_cache { 100 } else { 0 },
-        }
-    }
-    
-    fn supports_pooling(&self) -> bool {
-        true
-    }
-    
-    fn required_credentials() -> Vec<&'static str> {
-        vec!["weather_api_key"]
-    }
-}
-```
-
-### Step 5: Add Business Logic Methods
-
-```rust
-impl WeatherApiInstance {
-    /// Get current weather with caching
-    pub async fn get_current_weather(&self, location: &str) -> Result<WeatherData, WeatherError> {
-        let cache_key = format!("current:{}", location);
-        
-        // Check cache if enabled
-        if self.config.enable_cache {
-            if let Some(cached) = self.cache.get(&cache_key) {
-                if !cached.is_expired(Duration::from_secs(self.config.cache_ttl_secs)) {
-                    self.metrics.cache_hits.inc();
-                    return Ok(cached.data.clone());
+        loop {
+            // Check circuit breaker
+            if self.circuit_breaker.is_open() {
+                return Err(ServiceError::ServiceUnavailable {
+                    reason: "Circuit breaker is open".into(),
+                });
+            }
+            
+            // Try operation
+            match operation().await {
+                Ok(result) => {
+                    self.circuit_breaker.record_success();
+                    return Ok(result);
+                }
+                Err(error) => {
+                    self.circuit_breaker.record_failure();
+                    
+                    if !error.is_retriable() || attempts >= self.strategy.max_attempts {
+                        return Err(error);
+                    }
+                    
+                    // Calculate backoff
+                    let delay = self.strategy.calculate_backoff(attempts);
+                    
+                    // Apply jitter if configured
+                    let delay = if self.strategy.jitter {
+                        self.add_jitter(delay)
+                    } else {
+                        delay
+                    };
+                    
+                    tokio::time::sleep(delay).await;
+                    
+                    attempts += 1;
+                    last_error = Some(error);
                 }
             }
-            self.metrics.cache_misses.inc();
         }
-        
-        // Rate limiting
-        self.rate_limiter.wait_if_needed().await;
-        
-        // Circuit breaker check
-        if self.circuit_breaker.is_open() {
-            return Err(WeatherError::ServiceUnavailable);
-        }
-        
-        // Make API request
-        let start = Instant::now();
-        let url = format!("{}/current?location={}", self.config.endpoint, location);
-        
-        let response = match self.client.get(&url).send().await {
-            Ok(resp) => {
-                self.circuit_breaker.record_success();
-                resp
-            }
-            Err(e) => {
-                self.circuit_breaker.record_failure();
-                self.metrics.errors_total.inc();
-                return Err(WeatherError::ApiError(e.to_string()));
-            }
-        };
-        
-        // Record metrics
-        let duration = start.elapsed();
-        self.metrics.record_request_duration(duration);
-        self.metrics.requests_total.inc();
-        
-        // Parse response
-        let weather_data: WeatherData = response
-            .json()
-            .await
-            .map_err(|e| WeatherError::ParseError(e.to_string()))?;
-        
-        // Cache if enabled
-        if self.config.enable_cache {
-            self.cache.insert(
-                cache_key,
-                CachedWeatherData {
-                    data: weather_data.clone(),
-                    cached_at: Utc::now(),
-                }
-            );
-        }
-        
-        Ok(weather_data)
-    }
-    
-    /// Get weather forecast
-    pub async fn get_forecast(&self, location: &str, days: u32) -> Result<Forecast, WeatherError> {
-        // Similar implementation with caching and error handling
-        todo!()
-    }
-    
-    /// Get historical weather data
-    pub async fn get_historical(&self, location: &str, date: Date<Utc>) -> Result<WeatherData, WeatherError> {
-        // Implementation
-        todo!()
-    }
-    
-    /// Subscribe to weather alerts
-    pub async fn subscribe_alerts(&self, location: &str, criteria: AlertCriteria) -> Result<AlertSubscription, WeatherError> {
-        if self.config.alert_webhook.is_none() {
-            return Err(WeatherError::AlertsNotConfigured);
-        }
-        
-        // Implementation
-        todo!()
     }
 }
 ```
 
-## Using the Custom Resource
+## Performance Optimization
 
-### In an Action
+### Connection Pooling
 
 ```rust
-use nebula_action::prelude::*;
-
-#[derive(Action)]
-#[action(id = "weather.check")]
-#[resources([WeatherApiResource, LoggerResource])]
-pub struct WeatherCheckAction;
-
-#[derive(Deserialize)]
-pub struct WeatherInput {
-    pub location: String,
-    pub include_forecast: bool,
-}
-
-#[derive(Serialize)]
-pub struct WeatherOutput {
-    pub current: WeatherData,
-    pub forecast: Option<Forecast>,
-}
-
-#[async_trait]
-impl ProcessAction for WeatherCheckAction {
-    type Input = WeatherInput;
-    type Output = WeatherOutput;
+pub struct OptimizedPool<T> {
+    // Sharded pools for reduced contention
+    shards: Vec<Arc<Mutex<PoolShard<T>>>>,
     
-    async fn execute(
-        &self,
-        input: Self::Input,
-        context: &ExecutionContext,
-    ) -> Result<ActionResult<Self::Output>, ActionError> {
-        // Get resources
-        let weather = context.get_resource::<WeatherApiResource>().await?;
-        let logger = context.get_resource::<LoggerResource>().await?;
+    // Adaptive sizing
+    sizing_strategy: AdaptiveSizing,
+    
+    // Warm connections
+    warmer: ConnectionWarmer<T>,
+    
+    // Metrics
+    metrics: PoolMetrics,
+}
+
+impl<T: PoolableResource> OptimizedPool<T> {
+    pub async fn acquire(&self) -> Result<PooledConnection<T>> {
+        // Select shard based on thread ID for cache locality
+        let shard_id = thread_id() % self.shards.len();
+        let shard = &self.shards[shard_id];
         
-        logger.info(&format!("Checking weather for {}", input.location));
+        // Try fast path (no lock)
+        if let Some(conn) = shard.try_acquire_fast() {
+            self.metrics.record_fast_acquisition();
+            return Ok(conn);
+        }
         
-        // Get current weather
-        let current = weather
-            .get_current_weather(&input.location)
-            .await
-            .map_err(|e| ActionError::ExternalServiceError {
-                service: "weather_api".into(),
-                error: e.to_string(),
-            })?;
+        // Slow path with lock
+        let mut shard = shard.lock().await;
         
-        // Get forecast if requested
-        let forecast = if input.include_forecast {
-            Some(weather.get_forecast(&input.location, 5).await?)
-        } else {
-            None
-        };
+        // Check if we need to grow
+        if shard.should_grow() {
+            self.grow_shard(&mut shard).await?;
+        }
         
-        Ok(ActionResult::Success(WeatherOutput {
-            current,
-            forecast,
-        }))
+        // Acquire connection
+        match shard.acquire_with_timeout(Duration::from_secs(5)).await {
+            Ok(conn) => {
+                self.metrics.record_acquisition();
+                Ok(conn)
+            }
+            Err(_) => {
+                self.metrics.record_timeout();
+                Err(PoolError::Timeout)
+            }
+        }
+    }
+    
+    async fn grow_shard(&self, shard: &mut PoolShard<T>) -> Result<()> {
+        let target_size = self.sizing_strategy.calculate_target_size(
+            shard.current_size(),
+            shard.pending_requests(),
+            self.metrics.recent_load(),
+        );
+        
+        for _ in shard.current_size()..target_size {
+            let conn = T::create().await?;
+            shard.add(conn);
+        }
+        
+        Ok(())
     }
 }
 ```
 
-## Configuration File
+### Caching Strategy
 
-```toml
-# configs/weather_api.toml
-[weather_api]
-endpoint = "https://api.weather.com/v1"
-rate_limit = 60
-timeout_secs = 30
-enable_cache = true
-cache_ttl_secs = 300
+```rust
+pub struct SmartCache<K, V> {
+    // Multi-layer cache
+    l1_cache: Arc<DashMap<K, CachedValue<V>>>,  // In-memory
+    l2_cache: Arc<RedisCache>,                   // Redis
+    l3_cache: Arc<S3Cache>,                      // S3 for large objects
+    
+    // Cache strategy
+    strategy: CacheStrategy,
+    
+    // Metrics
+    metrics: CacheMetrics,
+}
 
-[weather_api.credentials]
-api_key_credential = "weather_api_key"
-
-# Tier overrides
-[tier.personal]
-endpoint = "https://api.weather.com/free"
-rate_limit = 10
-enable_cache = false
-
-[tier.enterprise]
-endpoint = "https://api.weather.com/premium"
-rate_limit = 100
-alert_webhook = "https://hooks.example.com/weather"
+impl<K: CacheKey, V: CacheValue> SmartCache<K, V> {
+    pub async fn get(&self, key: &K) -> Option<V> {
+        // Check L1 cache
+        if let Some(value) = self.l1_cache.get(key) {
+            if !value.is_expired() {
+                self.metrics.record_l1_hit();
+                return Some(value.clone());
+            }
+        }
+        
+        // Check L2 cache
+        if let Some(value) = self.l2_cache.get(key).await {
+            self.metrics.record_l2_hit();
+            
+            // Promote to L1
+            self.l1_cache.insert(key.clone(), value.clone());
+            
+            return Some(value);
+        }
+        
+        // Check L3 cache for large objects
+        if V::size_hint() > LARGE_OBJECT_THRESHOLD {
+            if let Some(value) = self.l3_cache.get(key).await {
+                self.metrics.record_l3_hit();
+                
+                // Promote to L2 and L1
+                self.l2_cache.set(key, &value).await;
+                self.l1_cache.insert(key.clone(), value.clone());
+                
+                return Some(value);
+            }
+        }
+        
+        self.metrics.record_miss();
+        None
+    }
+    
+    pub async fn set(&self, key: K, value: V) {
+        let cached = CachedValue::new(value, self.strategy.ttl());
+        
+        // Always set in L1
+        self.l1_cache.insert(key.clone(), cached.clone());
+        
+        // Set in L2 based on access patterns
+        if self.strategy.should_cache_l2(&key) {
+            self.l2_cache.set(&key, &cached).await;
+        }
+        
+        // Set in L3 for large objects
+        if V::size_hint() > LARGE_OBJECT_THRESHOLD {
+            self.l3_cache.set(&key, &cached).await;
+        }
+    }
+}
 ```
 
-## Testing
+### Batch Processing
+
+```rust
+pub struct BatchProcessor<T> {
+    batch_size: usize,
+    batch_timeout: Duration,
+    pending: Arc<Mutex<Vec<T>>>,
+    processor: Arc<dyn BatchHandler<T>>,
+}
+
+impl<T: Send + 'static> BatchProcessor<T> {
+    pub async fn add(&self, item: T) -> Result<()> {
+        let mut pending = self.pending.lock().await;
+        pending.push(item);
+        
+        if pending.len() >= self.batch_size {
+            let batch = std::mem::take(&mut *pending);
+            drop(pending); // Release lock before processing
+            
+            self.process_batch(batch).await?;
+        }
+        
+        Ok(())
+    }
+    
+    pub async fn start_background_processor(&self) {
+        let pending = Arc::clone(&self.pending);
+        let processor = Arc::clone(&self.processor);
+        let timeout = self.batch_timeout;
+        
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(timeout);
+            
+            loop {
+                interval.tick().await;
+                
+                let mut pending = pending.lock().await;
+                if !pending.is_empty() {
+                    let batch = std::mem::take(&mut *pending);
+                    drop(pending);
+                    
+                    if let Err(e) = processor.process(batch).await {
+                        log::error!("Batch processing failed: {}", e);
+                    }
+                }
+            }
+        });
+    }
+    
+    async fn process_batch(&self, batch: Vec<T>) -> Result<()> {
+        self.processor.process(batch).await
+    }
+}
+```
+
+## Testing Strategies
+
+### Property-Based Testing
 
 ```rust
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use nebula_resource::testing::*;
+    use proptest::prelude::*;
+    
+    proptest! {
+        #[test]
+        fn test_config_validation(
+            endpoint in "https?://[a-z]+\\.[a-z]+",
+            timeout in 1u64..3600u64,
+            rate_limit in 1u32..10000u32,
+        ) {
+            let config = ServiceConfig {
+                endpoint,
+                timeout_secs: timeout,
+                rate_limit,
+                ..Default::default()
+            };
+            
+            assert!(config.validate().is_ok());
+        }
+        
+        #[test]
+        fn test_pool_consistency(
+            operations in prop::collection::vec(pool_operation_strategy(), 0..100)
+        ) {
+            let pool = OptimizedPool::new();
+            
+            for op in operations {
+                match op {
+                    PoolOp::Acquire => {
+                        let _ = pool.acquire();
+                    }
+                    PoolOp::Release(conn) => {
+                        pool.release(conn);
+                    }
+                }
+            }
+            
+            assert!(pool.is_consistent());
+        }
+    }
+}
+```
+
+### Chaos Testing
+
+```rust
+#[cfg(test)]
+mod chaos_tests {
+    use chaos::prelude::*;
     
     #[tokio::test]
-    async fn test_weather_resource() {
-        // Auto-generated mock
-        let mut mock_weather = MockWeatherApiResource::new();
+    async fn test_resource_resilience() {
+        let chaos = ChaosEngine::new()
+            .with_failure_rate(0.1)  // 10% failure rate
+            .with_latency(Duration::from_millis(100)..Duration::from_secs(5))
+            .with_network_partition(0.05);  // 5% network partition
         
-        mock_weather
-            .expect_get_current_weather()
-            .with("London")
-            .returns(Ok(WeatherData {
-                temperature: 20.0,
-                humidity: 65,
-                conditions: "Partly cloudy".into(),
-            }))
-            .once();
+        let resource = create_resource_with_chaos(chaos);
         
-        let context = TestContext::builder()
-            .with_mock_resource(mock_weather)
-            .build();
+        // Run 1000 operations
+        let mut success = 0;
+        let mut failure = 0;
         
-        let weather = context.get_resource::<WeatherApiResource>().await.unwrap();
-        let result = weather.get_current_weather("London").await.unwrap();
+        for _ in 0..1000 {
+            match resource.operation().await {
+                Ok(_) => success += 1,
+                Err(_) => failure += 1,
+            }
+        }
         
-        assert_eq!(result.temperature, 20.0);
+        // Should handle at least 90% of requests despite chaos
+        assert!(success > 900);
+        
+        // Should not crash
+        assert!(resource.health_check().await.is_ok());
+    }
+}
+```
+
+### Benchmark Tests
+
+```rust
+#[cfg(test)]
+mod benches {
+    use criterion::{black_box, criterion_group, criterion_main, Criterion};
+    
+    fn benchmark_pool_acquisition(c: &mut Criterion) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let pool = runtime.block_on(create_pool());
+        
+        c.bench_function("pool_acquire", |b| {
+            b.to_async(&runtime).iter(|| async {
+                let conn = pool.acquire().await.unwrap();
+                black_box(conn);
+            });
+        });
+    }
+    
+    fn benchmark_cache_operations(c: &mut Criterion) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let cache = runtime.block_on(create_cache());
+        
+        let mut group = c.benchmark_group("cache");
+        
+        group.bench_function("get_hit", |b| {
+            b.to_async(&runtime).iter(|| async {
+                let value = cache.get(&"existing_key").await;
+                black_box(value);
+            });
+        });
+        
+        group.bench_function("get_miss", |b| {
+            b.to_async(&runtime).iter(|| async {
+                let value = cache.get(&"missing_key").await;
+                black_box(value);
+            });
+        });
+        
+        group.finish();
+    }
+    
+    criterion_group!(benches, benchmark_pool_acquisition, benchmark_cache_operations);
+    criterion_main!(benches);
+}
+```
+
+## Complete Example
+
+### Advanced Database Resource
+
+```rust
+use nebula_resource::prelude::*;
+
+#[derive(Resource)]
+#[resource(
+    id = "optimized_database",
+    name = "Optimized Database Connection",
+    lifecycle = "global",
+    pooled = true,
+    health_check_interval = "30s",
+    circuit_breaker = true,
+    auto_mock = true
+)]
+pub struct OptimizedDatabaseResource;
+
+#[derive(ResourceConfig)]
+pub struct OptimizedDatabaseConfig {
+    #[validate(custom = "validate_connection_url")]
+    pub connection_url: String,
+    
+    #[validate(range = "1..=1000")]
+    pub pool_size: usize,
+    
+    #[tier(personal = "10", professional = "50", enterprise = "200")]
+    pub max_connections: usize,
+    
+    #[default = "30s"]
+    pub connection_timeout: Duration,
+    
+    #[default = "true"]
+    pub enable_ssl: bool,
+    
+    #[credential(id = "database_password")]
+    pub password: SecretString,
+}
+
+pub struct OptimizedDatabaseInstance {
+    pool: OptimizedPool<PgConnection>,
+    query_cache: SmartCache<QueryKey, QueryResult>,
+    metrics: DatabaseMetrics,
+    health_monitor: HealthMonitor,
+}
+
+#[async_trait]
+impl ResourceInstance for OptimizedDatabaseInstance {
+    async fn health_check(&self) -> Result<HealthStatus> {
+        // Multi-level health check
+        let checks = vec![
+            self.check_connectivity().await,
+            self.check_pool_health().await,
+            self.check_query_performance().await,
+            self.check_replication_lag().await,
+        ];
+        
+        self.health_monitor.evaluate(checks).await
+    }
+    
+    // ... other methods
+}
+
+impl OptimizedDatabaseInstance {
+    pub async fn query<T>(&self, sql: &str, params: &[&dyn ToSql]) -> Result<Vec<T>> 
+    where
+        T: FromRow,
+    {
+        let key = QueryKey::new(sql, params);
+        
+        // Check cache first
+        if let Some(cached) = self.query_cache.get(&key).await {
+            self.metrics.record_cache_hit();
+            return Ok(cached);
+        }
+        
+        // Get connection from pool
+        let conn = self.pool.acquire().await?;
+        
+        // Execute query with timeout
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            conn.query(sql, params)
+        ).await??;
+        
+        // Cache result
+        self.query_cache.set(key, result.clone()).await;
+        
+        // Record metrics
+        self.metrics.record_query(sql, start.elapsed());
+        
+        Ok(result)
+    }
+    
+    pub async fn transaction<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut Transaction) -> Future<Output = Result<R>>,
+    {
+        let mut conn = self.pool.acquire().await?;
+        let mut tx = conn.begin().await?;
+        
+        match f(&mut tx).await {
+            Ok(result) => {
+                tx.commit().await?;
+                Ok(result)
+            }
+            Err(e) => {
+                tx.rollback().await?;
+                Err(e)
+            }
+        }
     }
 }
 ```
 
 ## Best Practices
 
-1. **Always implement health checks** - Critical for monitoring
-2. **Use caching wisely** - Balance freshness vs performance
-3. **Implement circuit breakers** - Prevent cascade failures
-4. **Add comprehensive metrics** - For observability
-5. **Handle credentials securely** - Never log or expose
-6. **Make resources reusable** - Design for pooling
-7. **Provide tier-specific configs** - Adjust for deployment tier
-8. **Write thorough tests** - Use auto-generated mocks
+1. **Always validate configuration** at compile time when possible
+2. **Use circuit breakers** for external services
+3. **Implement proper health checks** with multiple levels
+4. **Cache aggressively** but with proper invalidation
+5. **Pool connections** to reduce overhead
+6. **Monitor everything** - metrics, logs, traces
+7. **Test chaos scenarios** to ensure resilience
+8. **Document configuration options** thoroughly
+9. **Version your state** for backward compatibility
+10. **Handle errors gracefully** with proper recovery
+
+## Next Steps
+
+- [[StatefulResource|Creating Stateful Resources]]
+- [[PooledResource|Advanced Pooling Techniques]]
+- [[HealthChecks|Implementing Health Checks]]
+- [[Examples/|More Examples]]
