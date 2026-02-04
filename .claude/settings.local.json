@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"C:\\Users\\vanya\\RustroverProjects\\nebula-docs\\02-Crates\" /s /b)",
+      "Bash(xargs:*)",
+      "Bash(dir:*)",
+      "Bash(find:*)",
+      "mcp__deepwiki__ask_question",
+      "mcp__acp__Write",
+      "mcp__acp__Edit",
+      "mcp__acp__Bash",
+      "WebFetch(domain:)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:developer.hashicorp.com)",
+      "WebFetch(domain:external-secrets.io)",
+      "WebFetch(domain:docs.github.com)",
+      "WebFetch(domain:developers.google.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:www.thorsten-hans.com)",
+      "WebFetch(domain:lpalmieri.com)",
+      "WebFetch(domain:www.hashicorp.com)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

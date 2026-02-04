@@ -930,114 +930,438 @@ async fn test_workflow_with_mocks() {
 }
 ```
 
+## StreamingAction Examples
+
+### Server-Sent Events (SSE) Stream
+
+```rust
+use nebula_action::prelude::*;
+use futures::stream::{Stream, StreamExt};
+
+pub struct SseStreamAction {
+    metadata: ActionMetadata,
+}
+
+#[derive(Deserialize)]
+pub struct SseInput {
+    pub url: String,
+    pub headers: HashMap<String, String>,
+    pub retry_delay_ms: u64,
+}
+
+#[derive(Serialize, Clone)]
+pub struct SseEvent {
+    pub event_type: String,
+    pub data: String,
+    pub id: Option<String>,
+    pub retry: Option<u64>,
+}
+
+#[async_trait]
+impl StreamingAction for SseStreamAction {
+    type Input = SseInput;
+    type Item = SseEvent;
+
+    async fn stream(
+        &self,
+        input: Self::Input,
+        context: &Context,
+    ) -> Result<BoxStream<'static, Result<Self::Item, ActionError>>, ActionError> {
+        let client = reqwest::Client::new();
+
+        let mut request = client.get(&input.url);
+        for (key, value) in &input.headers {
+            request = request.header(key, value);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| ActionError::network_error(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(ActionError::external_service_error(
+                "sse",
+                format!("HTTP {}", response.status())
+            ));
+        }
+
+        let stream = async_stream::stream! {
+            let mut bytes_stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk) = bytes_stream.next().await {
+                match chunk {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        buffer.push_str(&text);
+
+                        // Process complete events
+                        while let Some(pos) = buffer.find("\n\n") {
+                            let event_text = buffer[..pos].to_string();
+                            buffer = buffer[pos + 2..].to_string();
+
+                            if let Some(event) = parse_sse_event(&event_text) {
+                                yield Ok(event);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(ActionError::network_error(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(stream))
+    }
+}
+
+fn parse_sse_event(text: &str) -> Option<SseEvent> {
+    let mut event_type = "message".to_string();
+    let mut data = String::new();
+    let mut id = None;
+    let mut retry = None;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_type = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(rest.trim());
+        } else if let Some(rest) = line.strip_prefix("id:") {
+            id = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("retry:") {
+            retry = rest.trim().parse().ok();
+        }
+    }
+
+    if data.is_empty() {
+        return None;
+    }
+
+    Some(SseEvent {
+        event_type,
+        data,
+        id,
+        retry,
+    })
+}
+```
+
+## TransactionalAction Examples
+
+### Distributed Transaction with Saga
+
+```rust
+use nebula_action::prelude::*;
+
+#[derive(Serialize, Deserialize)]
+pub struct OrderCompensationData {
+    pub order_id: String,
+    pub payment_id: Option<String>,
+    pub reservation_id: Option<String>,
+}
+
+pub struct ProcessOrderAction {
+    payment_service: Arc<PaymentService>,
+    inventory_service: Arc<InventoryService>,
+}
+
+#[async_trait]
+impl TransactionalAction for ProcessOrderAction {
+    type Input = OrderInput;
+    type Output = OrderOutput;
+    type CompensationData = OrderCompensationData;
+
+    async fn execute_tx(
+        &self,
+        input: Self::Input,
+        context: &Context,
+    ) -> Result<(Self::Output, Self::CompensationData), ActionError> {
+        let order_id = Uuid::new_v4().to_string();
+
+        // Step 1: Reserve inventory
+        let reservation_id = self.inventory_service
+            .reserve(&input.items)
+            .await
+            .map_err(|e| ActionError::permanent(format!("Inventory reserve failed: {}", e)))?;
+
+        context.log_info(&format!("Reserved inventory: {}", reservation_id));
+
+        // Step 2: Process payment
+        let payment_id = self.payment_service
+            .charge(&input.payment_method, input.amount)
+            .await
+            .map_err(|e| ActionError::permanent(format!("Payment failed: {}", e)))?;
+
+        context.log_info(&format!("Payment processed: {}", payment_id));
+
+        let output = OrderOutput {
+            order_id: order_id.clone(),
+            status: "completed".to_string(),
+            payment_id: payment_id.clone(),
+        };
+
+        let compensation = OrderCompensationData {
+            order_id,
+            payment_id: Some(payment_id),
+            reservation_id: Some(reservation_id),
+        };
+
+        Ok((output, compensation))
+    }
+
+    async fn compensate(
+        &self,
+        data: Self::CompensationData,
+        context: &Context,
+    ) -> Result<(), ActionError> {
+        context.log_warn(&format!("Compensating order: {}", data.order_id));
+
+        // Refund payment if charged
+        if let Some(payment_id) = data.payment_id {
+            self.payment_service
+                .refund(&payment_id)
+                .await
+                .map_err(|e| ActionError::permanent(format!("Refund failed: {}", e)))?;
+
+            context.log_info(&format!("Payment refunded: {}", payment_id));
+        }
+
+        // Release inventory if reserved
+        if let Some(reservation_id) = data.reservation_id {
+            self.inventory_service
+                .release(&reservation_id)
+                .await
+                .map_err(|e| ActionError::permanent(format!("Release failed: {}", e)))?;
+
+            context.log_info(&format!("Inventory released: {}", reservation_id));
+        }
+
+        Ok(())
+    }
+}
+```
+
+## InteractiveAction Examples
+
+### Manual Approval Workflow
+
+```rust
+use nebula_action::prelude::*;
+
+pub struct ApprovalAction {
+    notification_service: Arc<NotificationService>,
+}
+
+#[derive(Deserialize)]
+pub struct ApprovalRequest {
+    pub request_id: String,
+    pub title: String,
+    pub description: String,
+    pub approvers: Vec<String>,
+    pub timeout_hours: u32,
+}
+
+#[derive(Serialize)]
+pub struct ApprovalResponse {
+    pub approved: bool,
+    pub approver: String,
+    pub approved_at: DateTime<Utc>,
+    pub comments: Option<String>,
+}
+
+#[async_trait]
+impl InteractiveAction for ApprovalAction {
+    type Input = ApprovalRequest;
+    type Output = ApprovalResponse;
+    type InteractionData = ApprovalInteraction;
+
+    async fn request_interaction(
+        &self,
+        input: Self::Input,
+        context: &Context,
+    ) -> Result<InteractionRequest<Self::InteractionData>, ActionError> {
+        // Send notification to approvers
+        for approver in &input.approvers {
+            self.notification_service
+                .send_approval_request(
+                    approver,
+                    &input.title,
+                    &input.description,
+                    &input.request_id,
+                )
+                .await?;
+        }
+
+        context.log_info(&format!(
+            "Approval request sent to {} approvers",
+            input.approvers.len()
+        ));
+
+        Ok(InteractionRequest {
+            interaction_id: input.request_id.clone(),
+            data: ApprovalInteraction {
+                title: input.title,
+                description: input.description,
+                approvers: input.approvers,
+            },
+            timeout: Duration::from_secs(input.timeout_hours as u64 * 3600),
+        })
+    }
+
+    async fn process_interaction(
+        &self,
+        response: InteractionResponse,
+        context: &Context,
+    ) -> Result<Self::Output, ActionError> {
+        let data: ApprovalData = serde_json::from_value(response.data)
+            .map_err(|e| ActionError::validation(format!("Invalid approval data: {}", e)))?;
+
+        context.log_info(&format!(
+            "Approval {} by {}",
+            if data.approved { "granted" } else { "denied" },
+            data.approver
+        ));
+
+        Ok(ApprovalResponse {
+            approved: data.approved,
+            approver: data.approver,
+            approved_at: data.responded_at,
+            comments: data.comments,
+        })
+    }
+
+    async fn on_timeout(
+        &self,
+        interaction_data: Self::InteractionData,
+        context: &Context,
+    ) -> Result<Self::Output, ActionError> {
+        context.log_warn(&format!(
+            "Approval request '{}' timed out",
+            interaction_data.title
+        ));
+
+        // Auto-reject on timeout
+        Ok(ApprovalResponse {
+            approved: false,
+            approver: "system".to_string(),
+            approved_at: Utc::now(),
+            comments: Some("Automatically rejected due to timeout".to_string()),
+        })
+    }
+}
+```
+
+## Performance Optimization Examples
+
+### Batch Processing with Controlled Concurrency
+
+```rust
+use nebula_action::prelude::*;
+use futures::stream::{self, StreamExt};
+
+pub struct BatchProcessAction {
+    batch_size: usize,
+    max_concurrency: usize,
+}
+
+#[derive(Deserialize)]
+pub struct BatchInput {
+    pub items: Vec<serde_json::Value>,
+    pub parallel: bool,
+}
+
+#[derive(Serialize)]
+pub struct BatchOutput {
+    pub processed: usize,
+    pub failed: usize,
+    pub results: Vec<ProcessedItem>,
+}
+
+#[async_trait]
+impl ProcessAction for BatchProcessAction {
+    type Input = BatchInput;
+    type Output = BatchOutput;
+
+    async fn process(&self, input: Self::Input, context: &Context) -> Result<Self::Output> {
+        context.log_info(&format!(
+            "Processing {} items in batches of {}",
+            input.items.len(),
+            self.batch_size
+        ));
+
+        let mut results = Vec::new();
+        let mut failed = 0;
+
+        if input.parallel {
+            // Parallel processing with backpressure control
+            for chunk in input.items.chunks(self.batch_size) {
+                let chunk_results: Vec<_> = stream::iter(chunk)
+                    .map(|item| async move {
+                        self.process_single_item(item.clone(), context).await
+                    })
+                    .buffer_unordered(self.max_concurrency)
+                    .collect()
+                    .await;
+
+                for result in chunk_results {
+                    match result {
+                        Ok(item) => results.push(item),
+                        Err(e) => {
+                            context.log_error(&format!("Item processing failed: {}", e));
+                            failed += 1;
+                        }
+                    }
+                }
+
+                // Yield between batches
+                tokio::task::yield_now().await;
+            }
+        } else {
+            // Sequential processing
+            for item in input.items {
+                match self.process_single_item(item, context).await {
+                    Ok(result) => results.push(result),
+                    Err(e) => {
+                        context.log_error(&format!("Item processing failed: {}", e));
+                        failed += 1;
+                    }
+                }
+            }
+        }
+
+        context.record_metric("batch.processed", results.len() as f64);
+        context.record_metric("batch.failed", failed as f64);
+
+        Ok(BatchOutput {
+            processed: results.len(),
+            failed,
+            results,
+        })
+    }
+}
+
+impl BatchProcessAction {
+    async fn process_single_item(
+        &self,
+        item: serde_json::Value,
+        context: &Context,
+    ) -> Result<ProcessedItem, ActionError> {
+        // Process individual item
+        // ...implementation...
+        todo!()
+    }
+}
+```
+
 ## Related Documentation
 
 - [[Action Types]] - Overview of all action types
-    
 - [[Action Result System]] - Understanding result types
-    
 - [[Error Model]] - Error handling patterns
-    
-- [[Testing]] - Testing strategies and utilities time elapsed let elapsed = (now - state.last_refill).num_milliseconds() as f64 / 1000.0; let tokens_to_add = elapsed * self.limits.requests_per_second; state.tokens = (state.tokens + tokens_to_add).min(self.limits.burst_size as f64); state.last_refill = now;
-    
-    ```
-      // Clean old windows
-      while let Some(window) = state.windows.front() {
-          if (now - window.timestamp).num_seconds() > self.limits.window_seconds as i64 {
-              state.windows.pop_front();
-          } else {
-              break;
-          }
-      }
-      
-      // Check priority bypass
-      let tokens_required = match input.priority {
-          RequestPriority::Critical => 0.0, // Always allow critical
-          RequestPriority::High => input.tokens_required * 0.5,
-          RequestPriority::Normal => input.tokens_required,
-          RequestPriority::Low => input.tokens_required * 1.5,
-      };
-      
-      // Check if request can be served
-      let allowed = state.tokens >= tokens_required;
-      
-      if allowed {
-          state.tokens -= tokens_required;
-          state.total_requests += 1;
-          
-          context.log_debug(&format!(
-              "Rate limit passed: {} tokens used, {} remaining",
-              tokens_required,
-              state.tokens
-          ));
-      } else {
-          state.rejected_requests += 1;
-          
-          context.log_warning(&format!(
-              "Rate limit exceeded: {} tokens required, {} available",
-              tokens_required,
-              state.tokens
-          ));
-      }
-      
-      // Update current window
-      if let Some(window) = state.windows.back_mut() {
-          if (now - window.timestamp).num_seconds() < 1 {
-              if allowed {
-                  window.requests += 1;
-              } else {
-                  window.rejected += 1;
-              }
-          } else {
-              state.windows.push_back(WindowStats {
-                  timestamp: now,
-                  requests: if allowed { 1 } else { 0 },
-                  rejected: if allowed { 0 } else { 1 },
-              });
-          }
-      } else {
-          state.windows.push_back(WindowStats {
-              timestamp: now,
-              requests: if allowed { 1 } else { 0 },
-              rejected: if allowed { 0 } else { 1 },
-          });
-      }
-      
-      // Calculate retry after
-      let retry_after_ms = if !allowed {
-          let tokens_needed = tokens_required - state.tokens;
-          Some((tokens_needed / self.limits.requests_per_second * 1000.0) as u64)
-      } else {
-          None
-      };
-      
-      // Calculate stats
-      let stats = RateLimitStats {
-          total_requests: state.total_requests,
-          rejected_requests: state.rejected_requests,
-          success_rate: if state.total_requests > 0 {
-              (state.total_requests - state.rejected_requests) as f64 / state.total_requests as f64
-          } else {
-              1.0
-          },
-          current_qps: self.calculate_qps(&state.windows),
-      };
-      
-      let response = RateLimitResponse {
-          allowed,
-          tokens_remaining: state.tokens,
-          retry_after_ms,
-          stats,
-      };
-      
-      if allowed {
-          Ok(ActionResult::Success(response))
-      } else {
-          Ok(ActionResult::Retry {
-              after: Duration::from_millis(retry_after_ms.unwrap()),
-              reason: "Rate limit exceeded".to_string(),
-          })
-      }
-    ```
-    
-    } }
+- [[README#Testing]] - Testing strategies and utilities

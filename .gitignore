@@ -1,0 +1,38 @@
+# Obsidian
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/hotkeys.json
+.obsidian/graph.json
+.obsidian/app.json
+.obsidian/appearance.json
+.obsidian/plugins/*/data.json
+.trash/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.directory
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+*.orig
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build artifacts (if any)
+dist/
+build/
+out/
