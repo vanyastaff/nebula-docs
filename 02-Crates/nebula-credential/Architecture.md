@@ -920,6 +920,126 @@ pub struct EncryptedCredential {
 }
 ```
 
+### StorageProvider Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph "Trait Hierarchy"
+        SP[StorageProvider Trait<br/>async trait]
+    end
+    
+    subgraph "Core Operations"
+        Store[store<br/>CredentialId, EncryptedCredential]
+        Retrieve[retrieve<br/>CredentialId]
+        Delete[delete<br/>CredentialId]
+        List[list<br/>CredentialFilter]
+        CAS[cas<br/>Compare-and-Swap]
+    end
+    
+    SP --> Store
+    SP --> Retrieve
+    SP --> Delete
+    SP --> List
+    SP --> CAS
+    
+    subgraph "Provider Implementations"
+        Local[LocalStorageProvider<br/>SQLite + AES-256-GCM]
+        AWS[AwsSecretsManagerProvider<br/>AWS SDK + IAM]
+        Azure[AzureKeyVaultProvider<br/>Azure SDK + Managed Identity]
+        Vault[VaultProvider<br/>vaultrs + AppRole]
+        K8s[KubernetesSecretsProvider<br/>kube-rs + RBAC]
+    end
+    
+    SP -.implements.-> Local
+    SP -.implements.-> AWS
+    SP -.implements.-> Azure
+    SP -.implements.-> Vault
+    SP -.implements.-> K8s
+    
+    subgraph "Local Storage Details"
+        Local --> SQLite[(SQLite Database<br/>credentials.db)]
+        Local --> Encryption[AES-256-GCM<br/>Argon2id KDF]
+        SQLite --> WAL[Write-Ahead Log]
+    end
+    
+    subgraph "AWS Details"
+        AWS --> IAM[IAM Authentication]
+        AWS --> KMS[AWS KMS Encryption]
+        AWS --> Lambda[Lambda Rotation]
+        IAM --> SecretsManager[AWS Secrets Manager]
+        KMS --> SecretsManager
+    end
+    
+    subgraph "Azure Details"
+        Azure --> MI[Managed Identity]
+        Azure --> RBAC[Azure RBAC]
+        Azure --> EG[Event Grid Rotation]
+        MI --> KeyVault[Azure Key Vault]
+        RBAC --> KeyVault
+    end
+    
+    subgraph "Vault Details"
+        Vault --> AppRole[AppRole Auth]
+        Vault --> Transit[Transit Engine<br/>Encryption-as-a-Service]
+        Vault --> KV[KV v2 Secrets Engine]
+        AppRole --> VaultServer[HashiCorp Vault]
+        Transit --> VaultServer
+        KV --> VaultServer
+    end
+    
+    subgraph "Kubernetes Details"
+        K8s --> SA[ServiceAccount Token]
+        K8s --> K8sRBAC[Kubernetes RBAC]
+        K8s --> ESO[External Secrets Operator<br/>Optional]
+        SA --> Secrets[Kubernetes Secrets]
+        K8sRBAC --> Secrets
+        ESO -.syncs from.-> AWS
+        ESO -.syncs from.-> Azure
+        ESO -.syncs from.-> Vault
+    end
+    
+    style SP fill:#326ce5,color:#fff
+    style Local fill:#107c10,color:#fff
+    style AWS fill:#ff9900,color:#000
+    style Azure fill:#0078d4,color:#fff
+    style Vault fill:#000,color:#fff
+    style K8s fill:#326ce5,color:#fff
+```
+
+**Architecture Notes**:
+
+1. **Trait Design**: All providers implement the same `StorageProvider` trait with async methods
+2. **Encryption Layer**: 
+   - Local: Application-level AES-256-GCM with Argon2id KDF
+   - Cloud: Provider-managed HSM/KMS encryption (AWS KMS, Azure HSM, Vault Transit)
+3. **Authentication**:
+   - AWS: IAM roles (EC2, Lambda, ECS) or IAM users
+   - Azure: Managed Identity (system or user-assigned)
+   - Vault: AppRole, Kubernetes, AWS, Azure auth methods
+   - Kubernetes: ServiceAccount tokens with RBAC
+   - Local: Master password with keyring storage
+4. **Atomicity**: Compare-and-swap (CAS) for rotation across all providers
+5. **High Availability**:
+   - AWS/Azure: Built-in multi-AZ replication
+   - Vault: Raft clustering (3-5 nodes)
+   - Kubernetes: etcd HA (3-5 nodes)
+   - Local: Single-machine only
+6. **Hybrid Patterns**:
+   - External Secrets Operator syncs from AWS/Azure/Vault into Kubernetes Secrets
+   - Enables cloud-agnostic K8s deployments with cloud provider security
+
+**Performance Characteristics**:
+
+| Provider | Latency (p50) | Latency (p99) | Throughput | Cost/10K Ops |
+|----------|---------------|---------------|------------|--------------|
+| Local | <1ms | <5ms | 100K+ RPS | $0 |
+| Kubernetes | 5-15ms | 30-100ms | 50K+ RPS | $0 |
+| Vault (local) | 10-50ms | 100-200ms | 10K+ RPS | $0 (OSS) |
+| Azure Key Vault | 30-80ms | 150-300ms | 2K+ RPS | $0.03 |
+| AWS Secrets Mgr | 50-100ms | 200-500ms | 5K+ RPS | $0.40 |
+
+**See Also**: [[Provider-Comparison]] for detailed feature comparison.
+
 ### Provider Implementations
 
 #### Local File Storage

@@ -5,6 +5,8 @@ status: published
 lang: en
 created: 2026-02-03
 last_updated: 2026-02-03
+version: 1.1.0
+completion: 80/102 tasks (78%)
 ---
 
 # nebula-credential Documentation Dashboard
