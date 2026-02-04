@@ -1,7 +1,7 @@
 ---
 title: README
 tags: [nebula, nebula-credential, docs]
-status: draft
+status: published
 created: 2025-08-24
 ---
 
