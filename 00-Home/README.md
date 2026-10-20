@@ -8,10 +8,10 @@ last_updated: 2025-11-09
 
 # Welcome to Nebula Docs
 
-> [!WARNING]
-> This vault is outdated and no longer maintained; see the
-> [repository README](../README.md) for what changed and where the current
-> documentation lives.
+> [!NOTE]
+> This vault holds ideas, earlier design variants and prototypes, not
+> documentation of the current code; see the [repository README](../README.md)
+> for where the documentation of what is built lives.
 
 **Nebula** is a high-performance workflow automation engine written in Rust, combining type-safe action execution with event-driven orchestration for reliable automation at scale.
 
